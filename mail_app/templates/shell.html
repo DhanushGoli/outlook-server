@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ account.email }} — Inbox</title>
+  <link rel="stylesheet" href="/static/mail.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="mark">IN</div>
+        <div>
+          <div class="topbar-title">Host inbox</div>
+          <div class="uid">{% if signed_in %}{{ user.email }}{% else %}Private mailbox link{% endif %}</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        {% if signed_in %}
+        <a class="btn ghost" href="/login">Connect account</a>
+        <a class="btn ghost" href="/logout">Sign out</a>
+        {% else %}
+        <a class="btn ghost" href="/login">Sign in to manage</a>
+        {% endif %}
+      </div>
+    </header>
+    <div class="workspace">
+      <aside class="col side">
+        <div class="label">Mailboxes</div>
+        <ul class="accounts">
+          {% for acc in accounts %}
+          <li>
+            <a class="{% if acc.id == account.id %}active{% endif %}" href="/a/{{ acc.id }}">
+              <div class="acct-name">{{ acc.name }}</div>
+              <div class="uid">{{ acc.email }}</div>
+              <div class="uid">ID {{ acc.id }}</div>
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        <div class="host-box">
+          <div class="label" style="margin-top:0">Mailbox URL</div>
+          <div class="uid">{{ account_url(account.id) }}</div>
+        </div>
+        {% if signed_in %}
+        <form class="inline" method="post" action="/a/{{ account.id }}/disconnect" onsubmit="return confirm('Disconnect this mailbox from the site?');">
+          <button class="link" type="submit">Disconnect mailbox</button>
+        </form>
+        {% else %}
+        <p class="uid">Open this same link on any device. Do not share it.</p>
+        {% endif %}
+      </aside>
+      <section class="col">
+        <div class="list-head">
+          <h2>{{ account.email }}</h2>
+          <div class="uid">{{ messages|length }} messages</div>
+        </div>
+        <ul class="folders">
+          {% for key, label, tag in folders %}
+          <li>
+            <a class="{% if folder == key %}active{% endif %}" href="/a/{{ account.id }}?folder={{ key }}">
+              <span>{{ label }}</span><span class="tag">{{ tag }}</span>
+            </a>
+          </li>
+          {% endfor %}
+        </ul>
+        {% if error %}<p class="error" style="margin:12px">{{ error }}</p>{% endif %}
+        <ul class="list">
+          {% for m in messages %}
+          <li class="item {% if not m.isRead %}unread{% endif %} {% if msg_id == m.id %}active{% endif %}">
+            <a href="{{ mail_href(account.id, m, folder) }}">
+              <div class="avatar">{{ sender_initials(m) }}</div>
+              <div>
+                <div class="subject">{{ m.subject or "(no subject)" }}</div>
+                <div class="uid">{{ sender_name(m) }} · {{ m.receivedDateTime|when }}</div>
+                <div class="preview">{{ m.bodyPreview }}</div>
+              </div>
+            </a>
+          </li>
+          {% else %}
+          <li class="empty">This folder is empty.</li>
+          {% endfor %}
+        </ul>
+      </section>
+      <article class="col read">
+        {% if message %}
+        <div class="read-card">
+          <h1>{{ message.subject or "(no subject)" }}</h1>
+          <div class="from-row">
+            <div class="avatar">{{ sender_initials(message) }}</div>
+            <div>
+              <div class="acct-name">{{ sender_name(message) }}</div>
+              <div class="uid">{{ message.receivedDateTime|when }}</div>
+            </div>
+          </div>
+          <div class="body">{{ body_html | safe }}</div>
+        </div>
+        {% else %}
+        <p class="empty">Select a message to read it here.</p>
+        {% endif %}
+      </article>
+    </div>
+  </div>
+</body>
+</html>
