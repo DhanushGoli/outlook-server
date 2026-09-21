@@ -83,6 +83,8 @@ Keep `SESSION_SECRET` stable after the first deploy. Changing it invalidates sto
 
 The mailbox stays connected **until they revoke it** (Microsoft account → apps that can access your data → remove this app), or until an admin disconnects it here with the admin password.
 
+Connecting the same address again keeps the same `/a/<id>` link. The database uses SQLite WAL with full sync, and each process start writes `accounts.sqlite.bak` next to the live file. A changed `SESSION_SECRET` does not delete rows; the link stays and asks you to restore the original secret.
+
 The site refreshes Microsoft tokens in the background about every 6 hours so the link does not die from sitting unused. Also keep `SESSION_SECRET` unchanged.
 
 ## Admin directory
@@ -92,7 +94,7 @@ The site refreshes Microsoft tokens in the background about every 6 hours so the
 - Set `ADMIN_PASSWORD` in Railway. Then open `/admin`, enter that password, and you see **every** connected mailbox.
 - If `ADMIN_PASSWORD` is not set, only a Microsoft-signed-in operator can open `/admin`, and only **their** mailboxes are listed.
 - Unique mailbox links (`/a/<id>`) never unlock this page. Wrong passwords do not reveal whether a mailbox exists.
-- `/admin/inbox` shows incoming inbox mail from **all linked mailboxes** in one list. Open a row to read it in that mailbox.
+- `/admin/inbox` shows incoming mail from **all linked mailboxes** (Inbox, Outlook Other, and Junk) in one list. Open a row to read it in that mailbox. Each unique mailbox link also has Inbox, Other, Sent, Drafts, Junk, and Deleted.
 
 ## Tests
 
