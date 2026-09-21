@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -27,14 +29,55 @@ FOLDERS = (
     ("deleteditems", "Deleted", "DL"),
 )
 
-app = FastAPI(title="Host Inbox", docs_url=None, redoc_url=None)
+
+async def keep_connected_accounts() -> int:
+    """Refresh stored Microsoft tokens so mailboxes stay linked until revoked."""
+    if not settings.session_secret:
+        return 0
+    kept = 0
+    for ref in store.list_mailbox_refs():
+        account = store.get_account(ref.id, settings.session_secret)
+        if not account:
+            continue
+        result = auth.refresh_access_token(settings, account.refresh_token)
+        if not result:
+            continue
+        if result.get("refresh_token"):
+            store.update_refresh(account.id, result["refresh_token"], settings.session_secret)
+        kept += 1
+    return kept
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    task = None
+    disabled = os.getenv("DISABLE_TOKEN_KEEPALIVE", "").lower() in {"1", "true", "yes"}
+    if not disabled:
+
+        async def _loop() -> None:
+            wait = int(os.getenv("TOKEN_KEEPALIVE_SECONDS", str(6 * 60 * 60)))
+            wait = max(wait, 60)
+            while True:
+                try:
+                    await keep_connected_accounts()
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
+
+        task = asyncio.create_task(_loop())
+    yield
+    if task:
+        task.cancel()
+
+
+app = FastAPI(title="Host Inbox", docs_url=None, redoc_url=None, lifespan=_lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.session_secret or "dev-only-change-me",
     session_cookie="outlook_inbox_session",
     same_site="lax",
     https_only=settings.https_only,
-    max_age=60 * 60 * 24 * 30,
+    max_age=60 * 60 * 24 * 400,
 )
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -63,6 +106,13 @@ def _can_open(request: Request, account: store.Account) -> bool:
 
 def _admin_password() -> str:
     return os.getenv("ADMIN_PASSWORD", "").strip()
+
+
+def _admin_password_ok(password: str) -> bool:
+    expected = _admin_password()
+    if not expected:
+        return False
+    return hmac.compare_digest((password or "").encode("utf-8"), expected.encode("utf-8"))
 
 
 def _admin_session(request: Request) -> bool:
@@ -160,7 +210,8 @@ async def security_headers(request: Request, call_next):
 
 @app.get("/healthz")
 async def healthz():
-    return JSONResponse({"ok": True})
+    keepalive = os.getenv("DISABLE_TOKEN_KEEPALIVE", "").lower() not in {"1", "true", "yes"}
+    return JSONResponse({"ok": True, "keepalive": keepalive})
 
 
 @app.get("/robots.txt")
@@ -247,8 +298,7 @@ async def callback(request: Request):
 
 
 @app.get("/logout")
-async def logout(request: Request):
-    request.session.clear()
+async def logout():
     return RedirectResponse("/", status_code=302)
 
 
@@ -270,9 +320,7 @@ async def admin_login(request: Request, password: str = Form("")):
     expected = _admin_password()
     if not expected:
         return RedirectResponse("/", status_code=302)
-    given = (password or "").encode("utf-8")
-    ok = hmac.compare_digest(given, expected.encode("utf-8"))
-    if not ok:
+    if not _admin_password_ok(password):
         return templates.TemplateResponse(
             request,
             "admin_login.html",
@@ -283,10 +331,25 @@ async def admin_login(request: Request, password: str = Form("")):
     return RedirectResponse("/admin", status_code=302)
 
 
-@app.post("/admin/logout")
-async def admin_logout(request: Request):
-    request.session.pop("admin", None)
-    return RedirectResponse("/admin/login" if _admin_password() else "/", status_code=302)
+@app.post("/admin/signout")
+async def admin_signout(request: Request, password: str = Form("")):
+    if not _admin_session(request) or not _admin_password():
+        return RedirectResponse("/admin/login" if _admin_password() else "/", status_code=302)
+    if not _admin_password_ok(password):
+        mailboxes = _admin_mailboxes(request) or []
+        return templates.TemplateResponse(
+            request,
+            "admin.html",
+            {
+                "mailboxes": mailboxes,
+                "full_directory": True,
+                "password_login": True,
+                "signout_error": True,
+            },
+            status_code=401,
+        )
+    request.session.clear()
+    return RedirectResponse("/admin/login", status_code=302)
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -303,6 +366,7 @@ async def admin_directory(request: Request):
             "mailboxes": mailboxes,
             "full_directory": bool(_admin_session(request)),
             "password_login": bool(_admin_password()),
+            "signout_error": False,
         },
     )
 
@@ -316,14 +380,99 @@ async def inbox_redirect(request: Request):
 
 
 @app.post("/a/{account_id}/disconnect")
-async def disconnect(request: Request, account_id: str):
-    owner = _owner_email(request)
-    if not _session_user(request) or not owner:
+async def disconnect(request: Request, account_id: str, password: str = Form("")):
+    if not _admin_session(request) or not _admin_password_ok(password):
+        if _admin_password():
+            return RedirectResponse("/admin/login", status_code=302)
         return RedirectResponse("/", status_code=302)
-    store.delete_account(account_id, owner)
+    account = store.get_account(account_id, settings.session_secret)
+    if not account:
+        return RedirectResponse("/admin", status_code=302)
+    store.delete_account(account_id, account.owner_email)
     if request.session.get("active_account_id") == account_id:
         request.session.pop("active_account_id", None)
-    return RedirectResponse("/", status_code=302)
+    return RedirectResponse("/admin", status_code=302)
+
+
+async def _mailbox_token(request: Request, account_id: str) -> tuple[store.Account, str] | None:
+    account = store.get_account(account_id, settings.session_secret)
+    if not account:
+        return None
+    token = await _token_for_account(account)
+    if not token:
+        signed_in = bool(_session_user(request) and _can_open(request, account))
+        if signed_in:
+            token = await _access_token(request)
+    if not token:
+        return None
+    return account, token
+
+
+def _back_to_mailbox(account_id: str, folder: str, msg: str = "") -> RedirectResponse:
+    url = f"/a/{account_id}?folder={quote(folder, safe='')}"
+    if msg:
+        url += f"&msg={quote(msg, safe='')}"
+    return RedirectResponse(url, status_code=302)
+
+
+@app.post("/a/{account_id}/send")
+async def send_message(
+    request: Request,
+    account_id: str,
+    to: str = Form(""),
+    subject: str = Form(""),
+    body: str = Form(""),
+    folder: str = Form("inbox"),
+):
+    loaded = await _mailbox_token(request, account_id)
+    if not loaded:
+        return RedirectResponse("/?error=auth", status_code=302)
+    _account, token = loaded
+    to_addr = (to or "").strip()
+    if "@" not in to_addr:
+        return _back_to_mailbox(account_id, folder)
+    try:
+        await graph.send_mail(token, to_addr, subject.strip() or "(no subject)", body)
+    except graph.GraphError:
+        return _back_to_mailbox(account_id, folder)
+    return RedirectResponse(f"/a/{account_id}?folder=sentitems", status_code=302)
+
+
+@app.post("/a/{account_id}/delete")
+async def delete_open_message(
+    request: Request,
+    account_id: str,
+    message_id: str = Form(""),
+    folder: str = Form("inbox"),
+):
+    loaded = await _mailbox_token(request, account_id)
+    if not loaded or not message_id:
+        return RedirectResponse("/?error=auth", status_code=302)
+    _account, token = loaded
+    try:
+        await graph.delete_message(token, message_id)
+    except graph.GraphError:
+        return _back_to_mailbox(account_id, folder, message_id)
+    return _back_to_mailbox(account_id, folder)
+
+
+@app.post("/a/{account_id}/read")
+async def toggle_read(
+    request: Request,
+    account_id: str,
+    message_id: str = Form(""),
+    is_read: str = Form("true"),
+    folder: str = Form("inbox"),
+):
+    loaded = await _mailbox_token(request, account_id)
+    if not loaded or not message_id:
+        return RedirectResponse("/?error=auth", status_code=302)
+    _account, token = loaded
+    try:
+        await graph.set_read(token, message_id, is_read.lower() != "false")
+    except graph.GraphError:
+        pass
+    return _back_to_mailbox(account_id, folder, message_id)
 
 
 @app.get("/a/{account_id}", response_class=HTMLResponse)
@@ -360,6 +509,12 @@ async def account_inbox(request: Request, account_id: str):
                 body_html = sanitize_html(body)
             else:
                 body_html = sanitize_html(f"<pre>{body}</pre>")
+            if message.get("isRead") is False:
+                try:
+                    await graph.set_read(token, msg_id, True)
+                    message["isRead"] = True
+                except graph.GraphError:
+                    pass
     except graph.GraphError:
         error = "Could not load this mailbox. Connect the account again."
 
