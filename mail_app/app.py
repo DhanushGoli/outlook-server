@@ -1,1 +1,1 @@
-file:///workspace/mail_app/app.py
+<file>/workspace/mail_app/app.py</file>
