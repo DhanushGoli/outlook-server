@@ -40,7 +40,6 @@ IST = ZoneInfo("Asia/Kolkata")
 _token_cache: dict[str, tuple[float, str]] = {}
 _feed_cache: dict[tuple, tuple[float, tuple]] = {}
 
-
 async def keep_connected_accounts() -> int:
     """Refresh stored Microsoft tokens so mailboxes stay linked until revoked."""
     if not settings.session_secret:
