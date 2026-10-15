@@ -18,6 +18,7 @@ def start_login(settings: Settings) -> dict:
     return client.initiate_auth_code_flow(
         list(settings.scopes),
         redirect_uri=settings.redirect_uri,
+        prompt="consent",
     )
 
 
